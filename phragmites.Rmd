@@ -1,0 +1,1495 @@
+---
+title: "Phragmites"
+author: "LC"
+date: "22/11/2021"
+output: html_document
+---
+```{r}
+
+memory.limit(size=140000) # memory mi vede 14 GB
+library(dada2); packageVersion("dada2")
+
+#setwd and path containing fastq files
+setwd("C:/Users/Lisa Cangioli/Desktop/Lady/Gida S.p.a/PHRAGMITES ELISANGELA/Phragmites")
+
+path <- "C:/Users/Lisa Cangioli/Desktop/Lady/Gida S.p.a/PHRAGMITES ELISANGELA/Phragmites/all/noadapt"
+
+list.files(path)
+
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_L001_R1_001.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_L001_R2_001.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+```
+
+```{r}
+
+#Inspect read quality profiles
+#We start by visualizing the quality profiles of the forward reads:
+  
+plotQualityProfile(fnFs) 
+
+# In gray-scale is a heat map of the frequency of each quality score at each base position. The mean quality score at each position is shown by the green line, and the quartiles of the quality score distribution by the orange lines. The red line shows the scaled proportion of reads that extend to at least that position (this is more useful for other sequencing technologies, as Illumina reads are typically all the same length, hence the flat red line).
+  
+ # The forward reads are good quality. We generally advise trimming the last few nucleotides to avoid less well-controlled errors that can arise there. These quality profiles do not suggest that any additional trimming is needed. We will truncate the forward reads at position 240 (trimming the last 10 nucleotides).
+  
+ # Now we visualize the quality profile of the reverse reads:
+    
+plotQualityProfile(fnRs) 
+
+```
+
+```{r}
+
+# Filter and trim
+    
+#Assign the filenames for the filtered fastq.gz files.
+    
+# Place filtered files in filtered/ subdirectory
+    
+    filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+    filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+    names(filtFs) <- sample.names
+    names(filtRs) <- sample.names
+    
+    length(filtFs)
+    length(filtRs)
+    
+# We'll use standard filtering parameters: maxN=0 (DADA2 requires no Ns), truncQ=2, rm.phix=TRUE and maxEE=2. The maxEE parameter sets the maximum number of "expected errors" allowed in a read, which is a better filter than simply averaging quality scores.
+    
+    any(duplicated(c(fnFs, fnRs)))
+    any(duplicated(c(filtFs, filtRs)))
+    
+    
+    head(filtFs)
+    head(filtRs) 
+    
+    length(fnFs) 
+    length(fnRs)
+    
+    
+    
+    
+    out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, 
+                         truncLen=c(280,260), minLen = c(240,200),
+                         maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+                         compress=TRUE,  multithread=FALSE) # On Windows set multithread=FALSE
+    head(out)  
+#write.csv(out, "out.csv")
+
+```
+
+
+
+```{r}
+
+#Learn the Error Rates
+# The DADA2 algorithm makes use of a parametric error model (err) and every amplicon dataset has a different set of error rates. The learnErrors method learns this error model from the data, by alternating estimation of the error rates and inference of sample composition until 
+    # they converge on a jointly consistent solution. As in many machine-learning problems, the algorithm must begin with an initial guess, for which the maximum possible error rates in this data are used (the error rates if only the most abundant sequence is correct and all the rest are errors).  
+    
+errF <- learnErrors(filtFs, multithread=FALSE)
+
+errR<- learnErrors(filtRs, multithread=FALSE)
+
+
+
+
+#It is always worthwhile, as a sanity check if nothing else, to visualize the estimated error rates:
+      
+plotErrors(errF, nominalQ=TRUE)
+plotErrors(errR, nominalQ=TRUE)
+#The error rates for each possible transition (A→C, A→G, …) are shown. Points are the observed error rates for each consensus quality score. The black line shows the estimated error rates after convergence of the machine-learning algorithm. The red line shows the error rates expected under the nominal definition of the Q-score. 
+      
+
+```
+
+```{r}
+
+#Dereplicating: Dereplication combines all identical sequencing reads into into “unique sequences” with a corresponding “abundance”: the number of reads with that unique sequence. Dereplication substantially reduces computation time by eliminating redundant comparisons.
+
+table(file.exists(filtFs)) 
+table(file.exists(filtRs))
+
+exists <- file.exists(filtFs) & file.exists(filtRs)
+filtFs <- filtFs[exists]
+filtRs <- filtRs[exists]
+
+length(filtFs)
+length(filtRs)
+
+derepFs <- derepFastq(filtFs, verbose=TRUE)
+
+derepRs <- derepFastq(filtRs, verbose=TRUE)
+
+# Name the derep-class objects by the sample names
+names(derepFs) <- sample.names[exists]
+names(derepRs) <- sample.names[exists]
+
+```
+
+```{r}
+
+#Sample Inference
+
+dadaFs <- dada(derepFs, err=errF, multithread=FALSE)
+dadaRs <- dada(derepRs, err=errR, multithread=FALSE)
+      
+#Inspecting the returned dada-class object:
+        
+dadaFs[[1]]
+
+## dada-class: object describing DADA2 denoising results
+## 744 sequence variants were inferred from 46754 input unique sequences.
+## Key parameters: OMEGA_A = 1e-40, OMEGA_C = 1e-40, BAND_SIZE = 16
+#The DADA2 algorithm inferred 128 true sequence variants from the 1979 unique sequences in the first sample. 
+
+```
+
+```{r}
+
+#Merge paired reads
+#We now merge the forward and reverse reads together to obtain the full denoised sequences. Merging is performed by aligning the denoised forward reads with the reverse-complement of the corresponding denoised reverse reads, and then constructing the merged “contig” sequences. By default, merged sequences are only output if the forward and reverse reads overlap by at least 12 bases, and are identical to each other in the overlap region (but these conditions can be changed via function arguments).
+
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+
+#The mergers object is a list of data.frames from each sample. Each data.frame contains the merged $sequence, its $abundance, and the indices of the $forward and $reverse sequence variants that were merged. Paired reads that did not exactly overlap were removed by mergePairs, further reducing spurious output.
+
+#Construct sequence table
+#We can now construct an amplicon sequence variant table (ASV) table, a higher-resolution version of the OTU table produced by traditional methods.
+
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab2)
+
+seqtab2 <- seqtab[,nchar(colnames(seqtab))%in%404:480]
+
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+table(nchar(getSequences(seqtab2))) 
+
+#The sequence table is a matrix with rows corresponding to (and named by) the samples, and columns corresponding to (and named by) the sequence variants. This table contains 293 ASVs, and the lengths of our merged sequences all fall within the expected range for this V4 amplicon.
+
+
+```
+
+```{r}
+
+#Remove chimeras
+#The core dada method corrects substitution and indel errors, but chimeras remain. Fortunately, the accuracy of sequence variants after denoising makes identifying chimeric ASVs simpler than when dealing with fuzzy OTUs. Chimeric sequences are identified if they can be exactly reconstructed by combining a left-segment and a right-segment from two more abundant “parent” sequences.
+
+#seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=FALSE, verbose=TRUE)
+#dim(seqtab.nochim)
+
+#sum(seqtab.nochim)/sum(seqtab)
+
+#seqtab2
+
+seqtab2.nochim <- removeBimeraDenovo(seqtab2, method="consensus", multithread=FALSE, verbose=TRUE)
+dim(seqtab2.nochim)
+
+sum(seqtab2.nochim)/sum(seqtab2)
+ #The frequency of chimeric sequences varies substantially from dataset to dataset, and depends on on factors including experimental procedures and sample complexity. 
+#Most of your reads should remain after chimera removal
+
+#Track reads through the pipeline
+#As a final check of our progress, we’ll look at the number of reads that made it through each step in the pipeline:
+  
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab2.nochim))
+
+# If processing a single sample, remove the sapply calls: e.g. replace sapply(dadaFs, getN) with getN(dadaFs)
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+head(track)
+
+
+
+```
+
+```{r}
+
+#Assign taxonomy
+##It is common at this point, especially in 16S/18S/ITS amplicon sequencing, to assign taxonomy to the sequence variants. The DADA2 package provides a native implementation of the naive Bayesian classifier method for this purpose. The assignTaxonomy function takes as input a set of sequences to be classified and a training set of reference sequences with known taxonomy, and outputs taxonomic assignments with at least minBoot bootstrap confidence.
+
+# try this way (giova dice sia meglio)
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#  install.packages("BiocManager")
+#BiocManager::install("DECIPHER")
+
+library(DECIPHER); packageVersion("DECIPHER")
+library(dada2)
+
+memory.limit(size = 140000)
+file.exists("C:/Users/Lisa Cangioli/Desktop/Lady/Crop Microbiome Initiative/wheat/R files/fastq_noadapters1/SILVA_SSU_r138_2019.RData")
+dna <- DNAStringSet(getSequences(seqtab2.nochim)) # Create a DNAStringSet from the ASVs
+load("C:/Users/Lisa Cangioli/Desktop/Lady/Crop Microbiome Initiative/wheat/R files/fastq_noadapters1/SILVA_SSU_r138_2019.RData") # CHANGE TO THE PATH OF YOUR TRAINING SET
+ids <- IdTaxa(dna, trainingSet, strand="both", processors=NULL, verbose=FALSE) # use all processors #strand metti both 
+ranks <- c("domain", "phylum", "class", "order", "family", "genus", "species") # ranks of interest
+# Convert the output object of class "Taxa" to a matrix analogous to the output from assignTaxonomy
+taxid <- t(sapply(ids, function(x) {
+  m <- match(ranks, x$rank)
+  taxa <- x$taxon[m]
+  taxa[startsWith(taxa, "unclassified_")] <- NA
+  taxa
+}))
+colnames(taxid) <- ranks; rownames(taxid) <- getSequences(seqtab2.nochim)
+###### End of DADA2 part.
+```
+
+```{r}
+#phyloseq part
+library(phyloseq)
+library(ggplot2)      
+library(dplyr)        # filter and reformat data frames
+
+# Reading data
+setwd("C:/Users/Lisa Cangioli/Desktop/Lady/Gida S.p.a/PHRAGMITES ELISANGELA/Phragmites/R files")
+
+meta <- read.csv("metadata.csv", sep = ";")
+row.names(meta) <- meta$sample
+meta = subset(meta, select = -c(sample) )
+counts <- seqtab2.nochim
+taxa <- taxid
+
+
+  
+# Building phyloseq object
+ps <- phyloseq(otu_table(counts, taxa_are_rows = F),
+                    tax_table(taxa),
+                    sample_data(meta))
+
+dna <- Biostrings::DNAStringSet(taxa_names(ps))
+names(dna) <- taxa_names(ps)
+ps <- merge_phyloseq(ps, dna)
+taxa_names(ps) <- paste0("ASV", seq(ntaxa(ps)))
+ps
+# togliere campione V5S perchè ha < 10000 reads
+ps <- subset_samples(ps, rm=="no")
+ps
+
+ps <- subset_taxa(ps, phylum != "NA")
+ps
+
+ps_pianta <- prune_samples(sample_data(ps)$campione == "pianta", ps)
+ps_pianta_H <- prune_samples(sample_data(ps_pianta)$plant == "SFS-h exit", ps_pianta)
+ps_pianta_V <- prune_samples(sample_data(ps_pianta)$plant == "SFS-v entrance", ps_pianta)
+
+ps_permeato <- prune_samples(sample_data(ps)$campione == "permeato", ps)
+```
+
+ps_arc <- subset_taxa(ps, domain != "Archaea")
+
+```{r}
+#rename samples
+rownames(ps_permeato@sam_data) <-c ("P01","P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P18", "P19", "P02",  "P20",
+                                    "P21", "P22", "P23", "P24", "P03",  "P04",  "P05",  "P06",  "P07",  "P08",  "P09" )
+
+rownames(ps_permeato@otu_table) <-c ("P01","P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P18", "P19", "P02",  "P20",
+                                     "P21", "P22", "P23", "P24", "P03",  "P04",  "P05",  "P06",  "P07",  "P08",  "P09" )
+
+colnames(ps_permeato@sam_data)<-c("plant", "site", "sampling", "replicate", "sample", "rm")
+
+ps_permeato@sam_data$plant<-c("1.SFS-v entrance", "2.SFS-v exit/SFS-h entrance", "3.SFS-h exit",
+                              "3.SFS-h exit", "1.SFS-v entrance", "1.SFS-v entrance",
+                              "2.SFS-v exit/SFS-h entrance", "2.SFS-v exit/SFS-h entrance", "3.SFS-h exit",
+                              "3.SFS-h exit", "1.SFS-v entrance", "1.SFS-v entrance",
+                              "1.SFS-v entrance", "2.SFS-v exit/SFS-h entrance", "2.SFS-v exit/SFS-h entrance",
+                              "3.SFS-h exit", "3.SFS-h exit", "2.SFS-v exit/SFS-h entrance",
+                              "2.SFS-v exit/SFS-h entrance", "3.SFS-h exit", "3.SFS-h exit",
+                              "1.SFS-v entrance", "1.SFS-v entrance", "2.SFS-v exit/SFS-h entrance")
+
+```
+
+
+```{r}
+rownames(ps@sam_data) <-c ("H10A",  "H10BS", "H10R",  "H10RS", "H10S",  "H01A",   "H01BS",  "H01R",   "H01RS", 
+                           "H01S",   "H02A",   "H02R",   "H02RS",  "H02S",   "H03A",   "H03BS",  "H03R",   "H03RS", 
+                           "H03S",   "H04A",   "H04BS",  "H04R",   "H04RS",  "H04S",   "H05A",   "H05BS",  "H05R",  
+                           "H05RS",  "H05S",   "H06A",   "H06BS",  "H06R",   "H06RS",  "H06S",   "H07A",   "H07BS", 
+                           "H07R",   "H07RS",  "H07S",   "H08A",   "H08BS",  "H08R",   "H08RS",  "H08S",   "H09A",  
+                           "H09BS",  "H09R",   "H09RS",  "H09S",   "P01",    "P10",   "P11",   "P12",   "P13",  
+                           "P14",   "P15",   "P16",   "P17",   "P18",   "P19",   "P02",    "P20",   "P21",  
+                           "P22",   "P23",   "P24",   "P03",    "P04",    "P05",    "P06",    "P07",    "P08",   
+                           "P09",    "V10A",  "V10BS", "V10R",  "V10RS", "V10S",  "V01A",   "V01BS",  "V01R",  
+                           "V01RS",  "V01S",   "V02A",   "V02R",   "V02RS",  "V02S",   "V03A",   "V03BS",  "V03R",  
+                           "V03RS",  "V03S",   "V04A",   "V04BS",  "V04R",   "V04RS",  "V04S",   "V05A",   "V05BS", 
+                           "V05R",   "V05RS",  "V06A",   "V06BS",  "V06R",   "V06RS",  "V06S",   "V07A",   "V07BS", 
+                           "V07R",   "V07RS",  "V07S",   "V08A",   "V08BS",  "V08R",   "V08RS",  "V08S",   "V09A",  
+                           "V09BS",  "V09R",   "V09RS",  "V09S")
+
+rownames(ps@otu_table) <-c ("H10A",  "H10BS", "H10R",  "H10RS", "H10S",  "H01A",   "H01BS",  "H01R",   "H01RS", 
+                            "H01S",   "H02A",   "H02R",   "H02RS",  "H02S",   "H03A",   "H03BS",  "H03R",   "H03RS", 
+                            "H03S",   "H04A",   "H04BS",  "H04R",   "H04RS",  "H04S",   "H05A",   "H05BS",  "H05R",  
+                            "H05RS",  "H05S",   "H06A",   "H06BS",  "H06R",   "H06RS",  "H06S",   "H07A",   "H07BS", 
+                            "H07R",   "H07RS",  "H07S",   "H08A",   "H08BS",  "H08R",   "H08RS",  "H08S",   "H09A",  
+                            "H09BS",  "H09R",   "H09RS",  "H09S",   "P01",    "P10",   "P11",   "P12",   "P13",  
+                            "P14",   "P15",   "P16",   "P17",   "P18",   "P19",   "P02",    "P20",   "P21",  
+                            "P22",   "P23",   "P24",   "P03",    "P04",    "P05",    "P06",    "P07",    "P08",   
+                            "P09",    "V10A",  "V10BS", "V10R",  "V10RS", "V10S",  "V01A",   "V01BS",  "V01R",  
+                            "V01RS",  "V01S",   "V02A",   "V02R",   "V02RS",  "V02S",   "V03A",   "V03BS",  "V03R",  
+                            "V03RS",  "V03S",   "V04A",   "V04BS",  "V04R",   "V04RS",  "V04S",   "V05A",   "V05BS", 
+                            "V05R",   "V05RS",  "V06A",   "V06BS",  "V06R",   "V06RS",  "V06S",   "V07A",   "V07BS", 
+                            "V07R",   "V07RS",  "V07S",   "V08A",   "V08BS",  "V08R",   "V08RS",  "V08S",   "V09A",  
+                            "V09BS",  "V09R",   "V09RS",  "V09S")
+
+ps@sam_data$sito <- c("1.aerial part", "5.bulk soil",   "3.root",      "4.rhizosphere",   "2.stem",      
+                      "1.aerial part", "5.bulk soil",   "3.root",      "4.rhizosphere",   "2.stem",      
+                      "1.aerial part", "3.root",      "4.rhizosphere",   "2.stem",       "1.aerial part",
+                      "5.bulk soil",   "3.root",      "4.rhizosphere",   "2.stem",       "1.aerial part",
+                      "5.bulk soil",   "3.root",      "4.rhizosphere",   "2.stem",       "1.aerial part",
+                      "5.bulk soil",   "3.root",      "4.rhizosphere",   "2.stem",       "1.aerial part",
+                      "5.bulk soil",   "3.root",      "4.rhizosphere",   "2.stem",       "1.aerial part",
+                      "5.bulk soil",   "3.root",      "4.rhizosphere",   "2.stem",       "1.aerial part",
+                      "5.bulk soil",   "3.root",      "4.rhizosphere",   "2.stem",       "1.aerial part",
+                      "5.bulk soil",   "3.root",      "4.rhizosphere",   "2.stem",       "6.permeate" ,          
+                      "6.permeate", "6.permeate",  "6.permeate" , "6.permeate" , "6.permeate",           
+                      "6.permeate", "6.permeate",  "6.permeate",  "6.permeate",  "6.permeate" ,         
+                      "6.permeate", "6.permeate",  "6.permeate",  "6.permeate",  "6.permeate" ,        
+                      "6.permeate", "6.permeate" , "6.permeate",  "6.permeate",  "6.permeate",     
+                      "6.permeate", "6.permeate",  "6.permeate",  "1.aerial part", "5.bulk soil" , 
+                      "3.root" ,     "4.rhizosphere" ,  "2.stem",       "1.aerial part", "5.bulk soil" , 
+                      "3.root"  ,    "4.rhizosphere" ,  "2.stem" ,      "1.aerial part" ,"3.root" ,    
+                      "4.rhizosphere",   "2.stem",       "1.aerial part" ,"5.bulk soil",   "3.root" ,    
+                      "4.rhizosphere",   "2.stem" ,      "1.aerial part", "5.bulk soil" ,  "3.root" ,    
+                      "4.rhizosphere",   "2.stem",       "1.aerial part" ,"5.bulk soil" ,  "3.root" ,    
+                      "4.rhizosphere" ,  "1.aerial part" ,"5.bulk soil",   "3.root",      "4.rhizosphere" , 
+                      "2.stem",       "1.aerial part", "5.bulk soil",   "3.root",      "4.rhizosphere",  
+                      "2.stem" ,      "1.aerial part", "5.bulk soil" ,  "3.root",      "4.rhizosphere", 
+                      "2.stem" ,      "1.aerial part", "5.bulk soil",   "3.root" ,     "4.rhizosphere" , 
+                      "2.stem")
+
+```
+
+
+```{r}
+library(ranacapa)
+library(ggplot2)
+
+#rarecurve2
+
+rare1 <- ggrare(ps, step = 1000, color = "sampling", label = "Sample", se = FALSE) 
+rare2 <- rare1 + facet_wrap(~plant)
+rare1
+rare2
+```
+
+```{r}
+rich_pianta <- estimate_richness(ps)
+#write.csv(rich_pianta, "alpha_indices.csv")
+rich_pianta_H <- estimate_richness(ps_pianta_H)
+
+rich_pianta_V <- estimate_richness(ps_pianta_V)
+
+rich_permeato <- estimate_richness(ps_permeato)
+
+#Test whether the observed number of OTUs differs significantly between seasons. We make a non-parametric test, the Wilcoxon rank-sum test (Mann-Whitney):
+
+#Observed
+pairwise.wilcox.test(rich_pianta$Observed, sample_data(ps_pianta)$sampling)
+
+rich <- estimate_richness(ps)
+
+pairwise.wilcox.test(rich$Observed, sample_data(ps)$site)
+
+rich <- estimate_richness(ps_rsa)
+
+rich <- estimate_richness(ps_br)
+
+pairwise.wilcox.test(rich$Observed, sample_data(ps_rsa)$sampling)
+
+pairwise.wilcox.test(rich$Observed, sample_data(ps_br)$sampling)
+
+#pairwise.wilcox.test(rich_pianta_H$Observed, sample_data(ps_pianta_H)$sampling) 
+
+#pairwise.wilcox.test(rich_pianta_V$Observed, sample_data(ps_pianta_V)$sampling)
+
+pairwise.wilcox.test(rich_permeato$Observed, sample_data(ps_permeato)$sampling) 
+
+#Shannon
+pairwise.wilcox.test(rich_pianta$Shannon, sample_data(ps_pianta)$sampling)
+
+pairwise.wilcox.test(rich$Shannon, sample_data(ps)$site)
+
+pairwise.wilcox.test(rich$Shannon, sample_data(ps_rsa)$sampling)
+
+pairwise.wilcox.test(rich$Shannon, sample_data(ps_br)$sampling)
+
+#pairwise.wilcox.test(rich_pianta_H$Shannon, sample_data(ps_pianta_H)$sampling) 
+
+#pairwise.wilcox.test(rich_pianta_V$Shannon, sample_data(ps_pianta_V)$sampling)
+
+pairwise.wilcox.test(rich_permeato$Shannon, sample_data(ps_permeato)$sampling) 
+
+#Simpson
+pairwise.wilcox.test(rich_pianta$Simpson, sample_data(ps_pianta)$sampling) 
+
+pairwise.wilcox.test(rich$Simpson, sample_data(ps)$site)
+
+pairwise.wilcox.test(rich$Simpson, sample_data(ps_rsa)$sampling)
+
+pairwise.wilcox.test(rich$Simpson, sample_data(ps_br)$sampling)
+
+
+#pairwise.wilcox.test(rich_pianta_H$Simpson, sample_data(ps_pianta_H)$sampling) 
+
+#pairwise.wilcox.test(rich_pianta_V$Simpson, sample_data(ps_pianta_V)$sampling)
+
+pairwise.wilcox.test(rich_permeato$Simpson, sample_data(ps_permeato)$sampling) 
+```
+
+```{r}
+#Test whether the observed number of OTUs differs significantly between seasons. We make a non-parametric test, the Wilcoxon rank-sum test (Mann-Whitney):
+
+#Observed
+pairwise.wilcox.test(rich_pianta$Observed, sample_data(ps_pianta)$site)
+
+#Shannon
+pairwise.wilcox.test(rich_pianta$Shannon, sample_data(ps_pianta)$site) 
+
+#Simpson
+pairwise.wilcox.test(rich_pianta$Simpson, sample_data(ps_pianta)$site) 
+ 
+```
+
+
+```{r}
+#library(vegan)
+#beta
+#metadata <- as(sample_data(ps_pianta), "data.frame")
+
+#adonis(distance(ps_pianta, method="bray") ~ sampling,
+      #data = metadata)
+
+#metadata <- as(sample_data(ps_pianta), "data.frame")
+
+#adonis(distance(ps_pianta, method="bray") ~ sampling,
+      #data = metadata)
+
+#metadata_P <- as(sample_data(ps_permeato), "data.frame")
+
+#adonis(distance(ps_permeato, method="bray") ~ sampling,
+     #data = metadata_P)
+```
+
+```{r}
+library(pairwiseAdonis)
+dist.uf <- phyloseq::distance(ps_pianta, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps_pianta)$sampling)
+
+dist.uf <- phyloseq::distance(ps_pianta, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps_pianta)$site)
+
+dist.uf_P <- phyloseq::distance(ps_permeato, method = "bray")
+
+pairwise.adonis(dist.uf_P, sample_data(ps_permeato)$campionamento)
+```
+
+```{r}
+#permanova compartimenti pianta beta div
+ps_pianta <- prune_samples(sample_data(ps)$campione == "pianta", ps)
+
+ps_bulksoil <- prune_samples(sample_data(ps_pianta)$site == "bulk soil", ps_pianta)
+
+ps_aerialpart <- prune_samples(sample_data(ps_pianta)$site == "aerial part", ps_pianta)
+
+ps_rhizosphere <- prune_samples(sample_data(ps_pianta)$site == "rhizosphere", ps_pianta)
+
+ps_rootapparatus <- prune_samples(sample_data(ps_pianta)$site == "root apparatus", ps_pianta)
+
+ps_stem <- prune_samples(sample_data(ps_pianta)$site == "stem", ps_pianta)
+
+dist.uf <- phyloseq::distance(ps_bulksoil, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps_bulksoil)$sampling)
+
+dist.uf <- phyloseq::distance(ps_aerialpart, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps_aerialpart)$sampling)
+
+dist.uf <- phyloseq::distance(ps_rhizosphere, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps_rhizosphere)$sampling)
+
+dist.uf <- phyloseq::distance(ps_rootapparatus, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps_rootapparatus)$sampling)
+
+dist.uf <- phyloseq::distance(ps_stem, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps_stem)$sampling)
+
+
+dist.uf <- phyloseq::distance(ps, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps)$site)
+#write.csv(a, "a.csv")
+
+
+dist.uf <- phyloseq::distance(ps_permeato, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps_permeato)$plant)
+```
+
+
+```{r}
+
+ps_ventr <- prune_samples(sample_data(ps_permeato)$plant == "1.SFS-v entrance", ps_permeato)
+ps_int <- prune_samples(sample_data(ps_permeato)$plant == "2.SFS-v exit/SFS-h entrance", ps_permeato)
+ps_hexit <- prune_samples(sample_data(ps_permeato)$plant == "3.SFS-h exit", ps_permeato)
+
+dist.uf <- phyloseq::distance(ps_ventr, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps_ventr)$sampling)
+
+dist.uf <- phyloseq::distance(ps_int, method = "bray")
+
+pairwise.adonis(dist.uf, sample_data(ps_int)$sampling)
+
+dist.uf <- phyloseq::distance(ps_hexit, method = "bray")
+
+a<-pairwise.adonis(dist.uf, sample_data(ps_hexit)$sampling)
+
+```
+
+
+
+```{r}
+ps_rsa <- prune_samples(sample_data(ps_pianta)$site %in% c("stem","root apparatus", "aerial part"), ps_pianta)
+
+dist.uf <- phyloseq::distance(ps_rsa, method = "bray")
+
+a <- pairwise.adonis(dist.uf, sample_data(ps_rsa)$sampling)
+write.csv(a, "a.csv")
+
+
+ps_br <- prune_samples(sample_data(ps_pianta)$site %in% c("bulk soil","rhizosphere"), ps_pianta)
+
+dist.uf <- phyloseq::distance(ps_br, method = "bray")
+
+a <- pairwise.adonis(dist.uf, sample_data(ps_br)$sampling)
+write.csv(a, "a.csv")
+
+```
+
+
+```{r}
+library(QsRutils)
+
+#Goods coverage
+gcover <- goods(counts)
+#write.csv(gcover, "goods_coverage.csv")
+```
+
+```{r}
+x <- tax_glom(ps_pianta, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta)
+theme_set(theme_bw())
+tax_glom(ps_pianta, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+    geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=15)) +
+  #scale_x_discrete(limits= new_order)+
+  labs(y = "Relative abundance") +
+  facet_wrap(~ campionamento)
+
+x <- tax_glom(ps_pianta, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta)
+theme_set(theme_bw())
+tax_glom(ps_pianta, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+    geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=10)) +
+  #scale_x_discrete(limits= new_order)+
+  labs(y = "Relative abundance") +
+  facet_wrap(~ SFS)
+```
+
+
+
+```{r}
+#barplot >0.05 con abbondanza relativa pianta H campionamento phylum
+x <- tax_glom(ps_pianta_H, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta_H)
+theme_set(theme_bw())
+tax_glom(ps_pianta_H, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa pianta H campionamento order
+x <- tax_glom(ps_pianta_H, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta_H)
+theme_set(theme_bw())
+tax_glom(ps_pianta_H, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(order = ifelse(OTU %in% x, "Other", as.character(order))) %>%
+  mutate(order = reorder(factor(order), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = order)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa pianta V phylum
+x <- tax_glom(ps_pianta_V, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta_V)
+theme_set(theme_bw())
+tax_glom(ps_pianta_V, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance")
+
+par(mfrow=c(1,5))
+
+
+#barplot >0.05 con abbondanza relativa pianta V campionamento phylum
+x <- tax_glom(ps_pianta_V, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta_V)
+theme_set(theme_bw())
+tax_glom(ps_pianta_V, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa pianta V order
+x <- tax_glom(ps_pianta_V, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta_V)
+theme_set(theme_bw())
+tax_glom(ps_pianta_V, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(order = ifelse(OTU %in% x, "Other", as.character(order))) %>%
+  mutate(order = reorder(factor(order), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = order)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance")
+
+par(mfrow=c(1,5))
+
+
+#barplot >0.05 con abbondanza relativa pianta V campionamento order
+x <- tax_glom(ps_pianta_V, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta_V)
+theme_set(theme_bw())
+tax_glom(ps_pianta_V, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(order = ifelse(OTU %in% x, "Other", as.character(order))) %>%
+  mutate(order = reorder(factor(order), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = order)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa permeato phylum
+library(microbial)
+
+
+new_order <- c("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9", "P10", "P11", "P12", "P13", "P14", "P15", "P16", "P17", "P18", "P19", "P20", "P21", "P22", "P23", "P24")
+
+
+x <- tax_glom(ps_permeato, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_permeato)
+theme_set(theme_bw())
+tax_glom(ps_permeato, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+    geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=15)) +
+  #scale_x_discrete(limits= new_order)+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+  par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa permeato campionamento phylum
+x <- tax_glom(ps_permeato, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_permeato)
+theme_set(theme_bw())
+tax_glom(ps_permeato, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa permeato order
+x <- tax_glom(ps_permeato, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_permeato)
+theme_set(theme_bw())
+tax_glom(ps_permeato, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(order = ifelse(OTU %in% x, "Other", as.character(order))) %>%
+  mutate(order = reorder(factor(order), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = order)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") 
+
+par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa permeato campionamento order
+x <- tax_glom(ps_permeato, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_permeato)
+theme_set(theme_bw())
+tax_glom(ps_permeato, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(order = ifelse(OTU %in% x, "Other", as.character(order))) %>%
+  mutate(order = reorder(factor(order), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = order)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+par(mfrow=c(1,5))
+```
+
+
+```{r}
+#barplot >0.05 con abbondanza relativa pianta phylum
+x <- tax_glom(ps_pianta, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta)
+theme_set(theme_bw())
+tax_glom(ps_pianta, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~site)
+
+par(mfrow=c(3,3))
+
+#barplot >0.05 con abbondanza relativa pianta order
+x <- tax_glom(ps_pianta, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta)
+theme_set(theme_bw())
+tax_glom(ps_pianta, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(order = ifelse(OTU %in% x, "Other", as.character(order))) %>%
+  mutate(order = reorder(factor(order), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = order)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~site)
+
+par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa permeato phylum
+x <- tax_glom(ps_permeato, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_permeato)
+theme_set(theme_bw())
+tax_glom(ps_permeato, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~SFS)
+
+par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa permeato order
+x <- tax_glom(ps_permeato, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_permeato)
+theme_set(theme_bw())
+tax_glom(ps_permeato, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(order = ifelse(OTU %in% x, "Other", as.character(order))) %>%
+  mutate(order = reorder(factor(order), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = order)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~SFS)
+
+par(mfrow=c(1,5))
+```
+
+```{r}
+#barplot >0.05 con abbondanza relativa pianta H phylum
+x <- tax_glom(ps_pianta_H, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta_H)
+theme_set(theme_bw())
+tax_glom(ps_pianta_H, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa pianta V phylum
+x <- tax_glom(ps_pianta_V, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta_V)
+theme_set(theme_bw())
+tax_glom(ps_pianta_V, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+par(mfrow=c(1,5))
+
+#barplot >0.05 con abbondanza relativa permeato H
+x <- tax_glom(ps_permeato, "order") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_permeato)
+theme_set(theme_bw())
+tax_glom(ps_permeato, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(order = ifelse(OTU %in% x, "Other", as.character(order))) %>%
+  mutate(order = reorder(factor(order), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = order)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~SFS)
+
+par(mfrow=c(1,5))
+```
+
+
+```{r}
+#abb rel permeto e pianta
+#barplot >0.05 con abbondanza relativa pianta V phylum
+x <- tax_glom(ps_pianta, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_pianta)
+theme_set(theme_bw())
+tax_glom(ps_pianta, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+par(mfrow=c(1,5))
+
+x <- tax_glom(ps_permeato, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  otu_table() %>% data.frame()
+x <- colMeans(x)
+plot(cumsum(sort(x)), type = "l")
+abline(a = 0.05, b = 0)
+x <- cumsum(sort(x)) < 0.05
+x <- names(x)[x]
+sample_data(ps_permeato)
+theme_set(theme_bw())
+tax_glom(ps_permeato, "phylum") %>%
+  transform_sample_counts(function(x) x/sum(x)) %>%
+  psmelt() %>%
+  mutate(phylum = ifelse(OTU %in% x, "Other", as.character(phylum))) %>%
+  mutate(phylum = reorder(factor(phylum), Abundance, FUN = function(x) -sum(x))) %>%
+  ggplot(aes(x = Sample, y = Abundance, fill = phylum)) +
+  geom_col(alpha = 0.8) +
+  scale_color_gradientn(colours = rainbow) +
+  facet_grid(scales = "free_x", space = "free")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  labs(y = "Relative abundance") +
+  facet_wrap(~campionamento)
+
+par(mfrow=c(1,5))
+```
+
+
+
+
+
+```{r}
+#Visualize alpha-diversity:
+
+plot_richness(ps_pianta, x="sampling", measures=c("Shannon", "Simpson"), color="sito")
+plot_richness(ps_pianta_H, x="campionamento", measures=c("Shannon", "Simpson"), color="site")
+plot_richness(ps_pianta_V, x="campionamento", measures=c("Shannon", "Simpson"), color="site")
+plot_richness(ps_permeato, x="campionamento", measures=c("Shannon", "Simpson"), color="SFS")
+
+plot_richness(ps, x="sampling", measures=c("Shannon", "Simpson"), color="sito")
+
+
+plot_richness(ps, x="sito", measures=c("Shannon", "Simpson"), color="sampling")
+
+
+
+
+top20 <- names(sort(taxa_sums(ps_pianta), decreasing=TRUE))[1:20]
+ps.top20 <- transform_sample_counts(ps_pianta, function(OTU) OTU/sum(OTU))
+ps.top20 <- prune_taxa(top20, ps.top20)
+a <- plot_bar(ps.top20, x="Sample", fill="phylum") + theme(text = element_text(size = 20)) +facet_wrap(~campionamento)
+a + theme(text = element_text(size = 15), axis.text.x = element_text(angle = 90), legend.text = element_text( size = 15) )
+
+
+  top20 <- names(sort(taxa_sums(ps_permeato), decreasing=TRUE))[1:20]
+  ps.top20 <- transform_sample_counts(ps_permeato, function(OTU) OTU/sum(OTU))
+  ps.top20 <- prune_taxa(top20, ps.top20)
+  a <- plot_bar(ps.top20, x="Sample", fill="phylum") + theme(text = element_text(size = 20)) +facet_wrap(~campionamento)
+  a + theme(text = element_text(size = 15), axis.text.x = element_text(angle = 90), legend.text = element_text( size = 15) )
+
+all <- names(sort(taxa_sums(ps), decreasing=TRUE))
+ps.all <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+ps.all <- prune_taxa(all, ps.all)
+plot_bar(ps.all, x="Sample", fill="phylum") + facet_wrap(~sito, scales="free_x")+ theme(text = element_text(size = 20))
+
+#Ordinate:
+# Transform data to proportions as appropriate for Bray-Curtis distances
+ps.prop <- transform_sample_counts(ps_pianta, function(otu) otu/sum(otu))
+ord.nmds.bray <- ordinate(ps.prop, method="NMDS", distance="bray")
+
+plot_ordination(ps.prop, ord.nmds.bray, color="sampling", title="Bray NMDS", shape = "site") + geom_point(size=4)
+
+ps.prop <- transform_sample_counts(ps_pianta_H, function(otu) otu/sum(otu))
+ord.nmds.bray <- ordinate(ps.prop, method="NMDS", distance="bray")
+
+plot_ordination(ps.prop, ord.nmds.bray, color="campionamento", title="Bray NMDS", shape = "site")
+
+ps.prop <- transform_sample_counts(ps_pianta_V, function(otu) otu/sum(otu))
+ord.nmds.bray <- ordinate(ps.prop, method="NMDS", distance="bray")
+
+plot_ordination(ps.prop, ord.nmds.bray, color="campionamento", title="Bray NMDS", shape = "site")
+
+ps.prop <- transform_sample_counts(ps_permeato, function(otu) otu/sum(otu))
+ord.nmds.bray <- ordinate(ps.prop, method="NMDS", distance="bray")
+
+plot_ordination(ps.prop, ord.nmds.bray, color="sampling", title="Bray NMDS", shape = "plant") + geom_point(size=4)
+
+ps.prop <- transform_sample_counts(ps, function(otu) otu/sum(otu))
+ord.nmds.bray <- ordinate(ps.prop, method="NMDS", distance="bray")
+
+plot_ordination(ps.prop, ord.nmds.bray, color="sampling", title="Bray NMDS", shape = "site") + geom_point(size=4)
+
+```
+
+
+```{r}
+library(Biobase)
+otu <- t(as(otu_table(ps), "matrix"))
+write.table(otu, file = "study_seqs.tsv", sep="\t", quote = FALSE)
+data <- read_biom("C:/Users/Lisa Cangioli/Desktop/Lady/Crop Microbiome Initiative/wheat/R files/study_seqs.biom")
+```
+
+```{r}
+#phyloseq tutorial
+#Bar graphs
+ps_sub_H <- subset_taxa(ps_pianta_H, phylum != "NA")
+
+total = median(sample_sums(ps_sub_H))
+  standf = function(x, t=total) round(t * (x / sum(x)))
+  ps_sub_H = transform_sample_counts(ps_sub_H, standf)
+  
+plot_bar(ps_sub_H, fill = "phylum")+ geom_bar(aes(color=phylum, fill=phylum), stat="identity", position="stack")
+
+plot_bar(ps_sub_H, x="phylum", fill = "phylum", facet_grid = campionamento~sito) +
+  geom_bar(aes(color=phylum, fill=phylum), stat="identity", position="stack")
+ 
+
+
+ps_sub_V <- subset_taxa(ps_pianta_V, phylum != "NA")
+
+total = median(sample_sums(ps_sub_V))
+  standf = function(x, t=total) round(t * (x / sum(x)))
+  ps_sub_V = transform_sample_counts(ps_sub_V, standf)
+  
+
+plot_bar(ps_sub_V, x="phylum", fill = "phylum", facet_grid = campionamento~sito) +
+  geom_bar(aes(color=phylum, fill=phylum), stat="identity", position="stack")
+
+ps_sub_per <- subset_taxa(ps_permeato, phylum != "NA")
+
+total = median(sample_sums(ps_sub_H))
+  standf = function(x, t=total) round(t * (x / sum(x)))
+  ps_sub_H = transform_sample_counts(ps_sub_H, standf)
+  
+plot_bar(ps_sub_per, x="phylum", fill = "phylum", facet_grid = campionamento~sito) +
+  geom_bar(aes(color=phylum, fill=phylum), stat="identity", position="stack")
+  
+```
+
+```{r}
+#DESeq
+library(DESeq2)
+
+dds_H <- phyloseq_to_deseq2(ps_pianta_H, design = ~campionamento)
+dds_H <-estimateSizeFactors(dds_H, type = 'poscounts')
+dds_H <- DESeq(dds_H)
+res_H <- results(dds_H)
+res_H <- res_H[order(res_H$padj),]
+head(res_H)
+
+dds_V <- phyloseq_to_deseq2(ps_pianta_V, design = ~campionamento)
+dds_V <-estimateSizeFactors(dds_V, type = 'poscounts')
+dds_V <- DESeq(dds_V)
+res_V <- results(dds_V)
+res_V <- res_V[order(res_V$padj),]
+head(res_V)
+
+dds_P <- phyloseq_to_deseq2(ps_permeato, design = ~sampling)
+dds_P <-estimateSizeFactors(dds_P, type = 'poscounts')
+dds_P <- DESeq(dds_P)
+res_P <- results(dds_P)
+res_P <- res_P[order(res_P$padj),]
+head(res_P)
+write.csv(res_P, "res_P.csv")
+```
+
+```{r}
+#PCA deseq2 a una matrice per:
+#First we need to transform the raw count data
+#vst function will perform variance stabilizing transformation
+
+vs_H <- varianceStabilizingTransformation(dds_H, blind=FALSE)
+plotPCA(vs_H, intgroup="campionamento")
+
+vs_V <- varianceStabilizingTransformation(dds_V, blind=FALSE)
+plotPCA(vs_V, intgroup="campionamento")
+
+vs_P <- varianceStabilizingTransformation(dds_P, blind=FALSE)
+plotPCA(vs_P, intgroup="sampling")
+
+```
+
+
+ 
+ 
+```{r}
+library(microbiome)
+# #Differential abundance testing 
+# #This is simply applying PCA to the centered log-ratio (CLR) transformed counts. 
+# #CLR transform, The centered log-ratio (clr) transformation uses the geometric mean of the sample vector as the reference, Importantly, transformations are not normalizations: while normalizations claim to recast the data in absolute terms, transformations do not. The results of a transformation-based analysis must be interpreted with respect to the chosen reference. 
+ (ps_clr_H <- microbiome::transform(ps_pianta_H, "clr"))   
+# 
+ phyloseq::otu_table(ps_pianta_H)[1:5, 1:5]
+ phyloseq::otu_table(ps_clr_H)[1:5, 1:5]
+ 
+# #PCA via phyloseq
+ ord_clr_H <- phyloseq::ordinate(ps_pianta_H, "RDA")
+ #Plot scree plot
+ phyloseq::plot_scree(ord_clr_H) + 
+   geom_bar(stat="identity", fill = "blue") +
+   labs(x = "\nAxis", y = "Proportion of Variance\n")
+ 
+# #Examine eigenvalues and % prop. variance explained. eigenvalues=In matematica, in particolare in algebra lineare, un autovettore di una funzione tra spazi vettoriali è un vettore non nullo la cui immagine è il vettore stesso moltiplicato per un numero (reale o complesso) detto autovalore.[1] Se la funzione è lineare, gli autovettori aventi in comune lo stesso autovalore, insieme con il vettore nullo, formano uno spazio vettoriale, detto autospazio.[2] La nozione di autovettore viene generalizzata dal concetto di vettore radicale o autovettore generalizzato.
+ head(ord_clr_H$CA$eig)                                                  
+ 
+ sapply(ord_clr_H$CA$eig[1:5], function(x) x / sum(ord_clr_H$CA$eig)) 
+ 
+#Scale axes and plot ordination
+ clr1 <- ord_clr_H$CA$eig[1] / sum(ord_clr_H$CA$eig)
+ clr2 <- ord_clr_H$CA$eig[2] / sum(ord_clr_H$CA$eig)
+ phyloseq::plot_ordination(ps_pianta_H, ord_clr_H, type="samples", color="campionamento") + 
+   geom_point(size = 2) +
+   coord_fixed(clr2 / clr1) +
+   stat_ellipse(aes(group = campionamento), linetype = 2)
+ 
+ #PERMANOVA
+ #Generate distance matrix
+ clr_dist_matrix <- phyloseq::distance(ps_clr_H, method = "euclidean") 
+ #ADONIS test
+ vegan::adonis(clr_dist_matrix ~ phyloseq::sample_data(ps_clr_H)$campionamento)
+ 
+ #Dispersion test and plot
+ dispr <- vegan::betadisper(clr_dist_matrix, phyloseq::sample_data(ps_clr_H)$campionamento)
+ 
+ dispr
+ 
+ plot(dispr, main = "Ordination Centroids and Dispersion Labeled: Aitchison Distance", sub = "")
+ 
+ boxplot(dispr, main = "", xlab = "")
+ 
+ permutest(dispr, pairwise = TRUE)
+```
+ 
+ 
+```{r}
+library(microbiome)
+# #Differential abundance testing 
+# #This is simply applying PCA to the centered log-ratio (CLR) transformed counts. 
+# #CLR transform, The centered log-ratio (clr) transformation uses the geometric mean of the sample vector as the reference, Importantly, transformations are not normalizations: while normalizations claim to recast the data in absolute terms, transformations do not. The results of a transformation-based analysis must be interpreted with respect to the chosen reference. 
+ (ps_clr_V <- microbiome::transform(ps_pianta_V, "clr"))   
+# 
+ phyloseq::otu_table(ps_pianta_V)[1:5, 1:5]
+ phyloseq::otu_table(ps_clr_V)[1:5, 1:5]
+ 
+# #PCA via phyloseq
+ ord_clr_V <- phyloseq::ordinate(ps_pianta_V, "RDA")
+ #Plot scree plot
+ phyloseq::plot_scree(ord_clr_V) + 
+   geom_bar(stat="identity", fill = "blue") +
+   labs(x = "\nAxis", y = "Proportion of Variance\n")
+ 
+# #Examine eigenvalues and % prop. variance explained. eigenvalues=In matematica, in particolare in algebra lineare, un autovettore di una funzione tra spazi vettoriali è un vettore non nullo la cui immagine è il vettore stesso moltiplicato per un numero (reale o complesso) detto autovalore.[1] Se la funzione è lineare, gli autovettori aventi in comune lo stesso autovalore, insieme con il vettore nullo, formano uno spazio vettoriale, detto autospazio.[2] La nozione di autovettore viene generalizzata dal concetto di vettore radicale o autovettore generalizzato.
+ head(ord_clr_V$CA$eig)                                                  
+ 
+ sapply(ord_clr_V$CA$eig[1:5], function(x) x / sum(ord_clr_V$CA$eig)) 
+ 
+#Scale axes and plot ordination
+ clr1 <- ord_clr_V$CA$eig[1] / sum(ord_clr_V$CA$eig)
+ clr2 <- ord_clr_V$CA$eig[2] / sum(ord_clr_V$CA$eig)
+ phyloseq::plot_ordination(ps_pianta_V, ord_clr_V, type="samples", color="campionamento") + 
+   geom_point(size = 2) +
+   coord_fixed(clr2 / clr1) +
+   stat_ellipse(aes(group = campionamento), linetype = 2)
+ 
+ #PERMANOVA
+ #Generate distance matrix
+ clr_dist_matrix <- phyloseq::distance(ps_clr_V, method = "euclidean") 
+ #ADONIS 
+ vegan::adonis(clr_dist_matrix ~ phyloseq::sample_data(ps_clr_V)$sampling)
+ 
+ #Dispersion test and plot
+ dispr <- vegan::betadisper(clr_dist_matrix, phyloseq::sample_data(ps_clr_V)$campionamento)
+ 
+ dispr
+ 
+ plot(dispr, main = "Ordination Centroids and Dispersion Labeled: Aitchison Distance", sub = "")
+ 
+ boxplot(dispr, main = "", xlab = "")
+ 
+ permutest(dispr, pairwise = TRUE)
+```
+
+```{r}
+library(microbiome)
+# #Differential abundance testing 
+# #This is simply applying PCA to the centered log-ratio (CLR) transformed counts. 
+# #CLR transform, The centered log-ratio (clr) transformation uses the geometric mean of the sample vector as the reference, Importantly, transformations are not normalizations: while normalizations claim to recast the data in absolute terms, transformations do not. The results of a transformation-based analysis must be interpreted with respect to the chosen reference. 
+ (ps_clr_P <- microbiome::transform(ps_permeato, "clr"))   
+# 
+ phyloseq::otu_table(ps_permeato)[1:5, 1:5]
+ phyloseq::otu_table(ps_clr_P)[1:5, 1:5]
+ 
+# #PCA via phyloseq
+ ord_clr_P <- phyloseq::ordinate(ps_permeato, "RDA")
+ #Plot scree plot
+ phyloseq::plot_scree(ord_clr_P) + 
+   geom_bar(stat="identity", fill = "blue") +
+   labs(x = "\nAxis", y = "Proportion of Variance\n")
+ 
+# #Examine eigenvalues and % prop. variance explained. eigenvalues=In matematica, in particolare in algebra lineare, un autovettore di una funzione tra spazi vettoriali è un vettore non nullo la cui immagine è il vettore stesso moltiplicato per un numero (reale o complesso) detto autovalore.[1] Se la funzione è lineare, gli autovettori aventi in comune lo stesso autovalore, insieme con il vettore nullo, formano uno spazio vettoriale, detto autospazio.[2] La nozione di autovettore viene generalizzata dal concetto di vettore radicale o autovettore generalizzato.
+ head(ord_clr_P$CA$eig)                                                  
+ 
+ sapply(ord_clr_P$CA$eig[1:5], function(x) x / sum(ord_clr_P$CA$eig)) 
+ 
+#Scale axes and plot ordination
+ clr1 <- ord_clr_P$CA$eig[1] / sum(ord_clr_P$CA$eig)
+ clr2 <- ord_clr_P$CA$eig[2] / sum(ord_clr_P$CA$eig)
+ phyloseq::plot_ordination(ps_permeato, ord_clr_P, type="samples", color="sampling") + 
+   geom_point(size = 2) +
+   coord_fixed(clr2 / clr1) +
+   stat_ellipse(aes(group = sampling), linetype = 2)
+ 
+ #PERMANOVA
+ #Generate distance matrix
+ clr_dist_matrix <- phyloseq::distance(ps_clr_P, method = "euclidean") 
+ #ADONIS test
+ vegan::adonis(clr_dist_matrix ~ phyloseq::sample_data(ps_clr_P)$sampling)
+ 
+ #Dispersion test and plot
+ dispr <- vegan::betadisper(clr_dist_matrix, phyloseq::sample_data(ps_clr_P)$sampling)
+ 
+ dispr
+ 
+ plot(dispr, main = "Ordination Centroids and Dispersion Labeled: Aitchison Distance", sub = "")
+ 
+ boxplot(dispr, main = "", xlab = "")
+ 
+ permutest(dispr, pairwise = TRUE)
+```
+
+
+#analisi suolo permeati
+```{r}
+setwd("C:/Users/Lisa Cangioli/Desktop/Lady/Gida S.p.a/PHRAGMITES ELISANGELA/Phragmites/environmental fitting")
+ingresso <- read.csv("ingresso_noinfo.csv", sep = ";", header = T)
+ingresso <- as.matrix(ingresso)
+library(MASS)
+library(vegan)
+ps_permeato_ingresso <- prune_samples(sample_data(ps_permeato)$impianto == "ingresso verticale", ps_permeato)
+ord <- cca(otu_table(ps_permeato_ingresso)) #ps2 è il mio oggetto phyloseq
+fit <- envfit(ord, ingresso, perm = 999) #chem è la tabella coi dati chimici
+scores(fit, "vectors")
+plot(ord)
+plot(fit)
+plot(fit, p.max = 0.05, col = "red")
+```
+
+```{r}
+uscita_or <- read.csv("uscita oriz_noinfo.csv", sep = ";", header = T)
+uscita_or <- as.matrix(uscita_or)
+library(MASS)
+library(vegan)
+ps_permeato_uscor <- prune_samples(sample_data(ps_permeato)$impianto == "uscita orizzontale", ps_permeato)
+ord <- cca(otu_table(ps_permeato_uscor)) #ps2 è il mio oggetto phyloseq
+fit <- envfit(ord, uscita_or, perm = 999) #chem è la tabella coi dati chimici
+scores(fit, "vectors")
+plot(ord)
+plot(fit)
+plot(fit, p.max = 0.05, col = "red")
+```
+
+```{r}
+uscita_vert <- read.csv("uscita vert_noinfo.csv", sep = ";", header = T)
+uscita_vert <- as.matrix(uscita_vert)
+
+ps_permeato_uscvert <- prune_samples(sample_data(ps_permeato)$impianto == "verticale/orizzontale", ps_permeato)
+ord <- cca(otu_table(ps_permeato_uscvert)) #ps2 è il mio oggetto phyloseq
+fit <- envfit(ord, uscita_vert, perm = 999) #chem è la tabella coi dati chimici
+scores(fit, "vectors")
+plot(ord)
+plot(fit)
+plot(fit, p.max = 0.05, col = "red")
+```

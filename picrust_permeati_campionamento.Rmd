@@ -1,0 +1,92 @@
+---
+title: "picrust_permeato_campionamento"
+author: "LC"
+date: '2022-09-05'
+output: html_document
+---
+#PATHWAY PREDICTED SFS
+```{r}
+library(readr)
+library(ggplot2)
+library(devtools)
+library(factoextra)
+library(vegan)
+
+setwd("C:/Users/Lisa Cangioli/Desktop/Lady/Gida S.p.a/PHRAGMITES ELISANGELA/Phragmites/picrust permeato/picrust_out/pathways_out_campionamento")
+
+
+#simper test 
+
+tab <- read.csv("path_abun_unstrat.csv", sep = "")
+ttab <- t(tab)
+write.csv(ttab, "ttab.csv")
+#agiungi colonna con num campionamento a ttab e ricarica la nuova ttab
+ttab_sampling <- read.csv("ttab_sampling.csv")
+
+
+
+
+ttab_env <- read.csv("data_env.csv", sep = ",")
+ttab_sampling <- data.matrix(ttab_sampling)
+sim <- with(ttab_env, simper(ttab_sampling, sampling))
+simsum <- summary(sim)
+
+
+
+```
+
+#EXTRACT TOP 3 PATHWAYS FROM EACH CONTRAST
+```{r}
+top3<-lapply(simsum, `[`,1:3,)#get top 3 contributors
+cuss<-lapply(top3, `[`,6)#get last column
+
+rows<-lapply(top3, rownames)#get names from list
+rows2<-lapply(cuss, cumsum)#get values from list
+
+
+rowsdf<-do.call(rbind, lapply(rows, data.frame, stringsAsFactors=FALSE))#names into df
+
+cusumdf<-do.call(rbind, lapply(rows2, data.frame, stringsAsFactors=FALSE))#values into df
+
+simperdf<-cbind(rowsdf,cusumdf) #combine into one df
+
+colnames(simperdf)<-c('name','cusum') #change colnames
+
+library(data.table)
+
+setDT(simperdf, keep.rownames = TRUE)[]#convert rownames to a column
+
+library(tidyr)
+simperdf<-separate(data = simperdf, col = rn, into = c("left", "right"), sep = "\\_")#seperate contrasts names
+simperdf<-separate(data = simperdf, col = right, into = c("right", "delete"), sep = "\\.")#separate numbers
+simperdf$delete<-NULL#delete number column
+
+#write.csv(simperdf, "simperdf.csv")
+```
+
+#HEATMAP E PCA SIMPER RESULTS
+```{r}
+library(devtools)
+library(ggbiplot)
+
+#write.csv(tab, "tab.csv") #è la prima tab dello script
+simper_paths <- read.csv("pathways_simper.csv", sep = ",")
+row.names(simper_paths) <- simper_paths$pathway
+simper_paths = subset(simper_paths, select = -c(pathway) )
+
+pca <- prcomp(t(simper_paths))
+summary(pca)
+ggbiplot(pca)
+ggbiplot(pca, labels=colnames(simper_paths))
+
+
+
+simper_matrix <- data.matrix(simper_paths)
+hmap_simper <- heatmap(simper_matrix, cexRow = 1) 
+
+require(pheatmap)
+require(RColorBrewer)
+pheatmap(as.matrix(simper_matrix),color=brewer.pal(9,"YlOrRd"))
+
+```
+
